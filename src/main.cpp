@@ -25,7 +25,7 @@
 ModulinoThermo thermo;
 
 // Pin Definitions
-#define RELAY_PIN 7         // Relay module control pin for heating pad
+#define RELAY_PIN A5         // Relay module control pin for heating pad
 
 // ============ ADJUST THESE VALUES ============
 // Humidity Thresholds
@@ -34,7 +34,8 @@ ModulinoThermo thermo;
 
 // Temperature Limits
 #define TARGET_TEMP 40.0         // Target mirror temperature in Celsius (104°F)
-#define MAX_SAFE_TEMP 45.0       // Safety cutoff - stop if exceeded (113°F)
+#define MAX_SAFE_TEMP 50.0       // Safety cutoff - stop if exceeded (113°F)
+#define TEMP_RESET_TEMP 39.0     // Re-enable heating after safety cutoff once cooled to this temp
 #define MIN_TEMP 10.0            // Don't heat if room is too cold (safety)
 
 // Duty Cycle Timing (all in milliseconds)
@@ -55,6 +56,7 @@ enum SystemMode {
 
 SystemMode currentMode = IDLE;
 bool heatingActive = false;
+bool temperatureLockout = false;
 unsigned long lastSensorRead = 0;
 unsigned long lastModeChange = 0;
 
@@ -141,7 +143,28 @@ void loop() {
     Serial.print("Mirror Temp: "); Serial.print(mirrorTemp, 1); 
     Serial.print("°C ("); Serial.print(celsiusToFahrenheit(mirrorTemp), 1); Serial.println("°F)");
     Serial.print("Heating Pads: "); Serial.println(heatingActive ? "ON" : "OFF");
+    Serial.print("Temp Lockout: "); Serial.println(temperatureLockout ? "ACTIVE" : "INACTIVE");
     Serial.println();
+
+    // Safety lockout gate: after high-temp cutoff, do not allow reheating
+    // until mirror temperature cools to TEMP_RESET_TEMP.
+    if (temperatureLockout) {
+      if (mirrorTemp <= TEMP_RESET_TEMP) {
+        temperatureLockout = false;
+        Serial.print("Temp lockout cleared at ");
+        Serial.print(mirrorTemp, 1);
+        Serial.println("°C - heating allowed again");
+      } else {
+        if (heatingActive) {
+          turnOffHeating();
+        }
+        currentMode = IDLE;
+        Serial.print("Temp lockout active: waiting to cool to ");
+        Serial.print(TEMP_RESET_TEMP, 1);
+        Serial.println("°C before reheating");
+        return;
+      }
+    }
 
     // State machine logic
     switch(currentMode) {
@@ -190,6 +213,7 @@ void runHeatingCycle(float humidity, float temp) {
     Serial.print("SAFETY CUTOFF: Temp too high (");
     Serial.print(temp, 1); Serial.println("°C)");
     turnOffHeating();
+    temperatureLockout = true;
     currentMode = IDLE;
     return;
   }
