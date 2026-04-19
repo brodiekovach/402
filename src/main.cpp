@@ -21,11 +21,14 @@
  */
 
 #include <Modulino.h>
+#include <Adafruit_NeoPixel.h>
 
 ModulinoThermo thermo;
 
 // Pin Definitions
 #define RELAY_PIN A5         // Relay module control pin for heating pad
+#define LED_PIN 6            // WS2812B data input pin
+#define BUTTON_PIN 4         // Button pin (wired to GND, uses INPUT_PULLUP)
 
 // ============ ADJUST THESE VALUES ============
 // Humidity Thresholds
@@ -45,6 +48,12 @@ ModulinoThermo thermo;
 // Sensor Check Intervals
 #define IDLE_CHECK_INTERVAL 30000   // Check sensors every 30 seconds when IDLE
 #define ACTIVE_CHECK_INTERVAL 10000 // Check sensors every 10 seconds when heating/cooling
+
+// LED Settings
+#define LED_COUNT 30                // Number of LEDs in the WS2812B strip
+#define LED_BRIGHTNESS 80           // Global strip brightness (0-255)
+#define TRANSITION_FADE_TIME 8000   // Red->Blue fade time when stopping early (ms)
+#define BUTTON_DEBOUNCE_TIME 50     // Button debounce time (ms)
 // =============================================
 
 // System State
@@ -54,15 +63,32 @@ enum SystemMode {
   COOLDOWN        // Heating pads OFF, waiting before next cycle
 };
 
+Adafruit_NeoPixel strip(LED_COUNT, LED_PIN, NEO_GRB + NEO_KHZ800);
+
 SystemMode currentMode = IDLE;
 bool heatingActive = false;
 bool temperatureLockout = false;
+bool whiteLightOverride = false;
+bool cooldownFadeActive = false;
 unsigned long lastSensorRead = 0;
 unsigned long lastModeChange = 0;
+unsigned long cooldownFadeStart = 0;
+
+bool lastButtonReading = HIGH;
+bool stableButtonState = HIGH;
+unsigned long lastDebounceTime = 0;
+
+uint8_t lastLedR = 255;
+uint8_t lastLedG = 255;
+uint8_t lastLedB = 255;
+bool ledStateInitialized = false;
 
 // Function declarations
 void checkAndEnterHeatingMode(float humidity, float temp);
 void runHeatingCycle(float humidity, float temp);
+void updateButtonState(unsigned long currentTime);
+void updateStripColor(unsigned long currentTime);
+void setStripColorIfChanged(uint8_t red, uint8_t green, uint8_t blue);
 void turnOnHeating();
 void turnOffHeating();
 float celsiusToFahrenheit(float celsius);
@@ -86,7 +112,14 @@ void setup() {
   Serial.println("Initializing pins...");
   pinMode(RELAY_PIN, OUTPUT);
   digitalWrite(RELAY_PIN, LOW); // Relay OFF initially
+  pinMode(BUTTON_PIN, INPUT_PULLUP);
   Serial.println("Pins initialized OK");
+
+  Serial.println("Initializing WS2812B strip...");
+  strip.begin();
+  strip.setBrightness(LED_BRIGHTNESS);
+  strip.show();
+  Serial.println("WS2812B initialized OK");
 
   // Initialize Modulino system
   Serial.println("Initializing Modulino system...");
@@ -109,6 +142,8 @@ void setup() {
 
 void loop() {
   unsigned long currentTime = millis();
+  updateButtonState(currentTime);
+  updateStripColor(currentTime);
 
   // Determine check interval based on mode
   unsigned long checkInterval = (currentMode == IDLE) ? IDLE_CHECK_INTERVAL : ACTIVE_CHECK_INTERVAL;
@@ -159,6 +194,8 @@ void loop() {
           turnOffHeating();
         }
         currentMode = IDLE;
+        cooldownFadeActive = true;
+        cooldownFadeStart = currentTime;
         Serial.print("Temp lockout active: waiting to cool to ");
         Serial.print(TEMP_RESET_TEMP, 1);
         Serial.println("°C before reheating");
@@ -199,6 +236,7 @@ void checkAndEnterHeatingMode(float humidity, float temp) {
     Serial.println("%) exceeds threshold");
     currentMode = HEATING;
     lastModeChange = currentTime;
+    cooldownFadeActive = false;
     turnOnHeating();
   }
 }
@@ -215,6 +253,8 @@ void runHeatingCycle(float humidity, float temp) {
     turnOffHeating();
     temperatureLockout = true;
     currentMode = IDLE;
+    cooldownFadeActive = true;
+    cooldownFadeStart = currentTime;
     return;
   }
   
@@ -224,6 +264,8 @@ void runHeatingCycle(float humidity, float temp) {
     Serial.println("% - EXITING to IDLE mode");
     turnOffHeating();
     currentMode = IDLE;
+    cooldownFadeActive = true;
+    cooldownFadeStart = currentTime;
     return;
   }
   
@@ -236,6 +278,7 @@ void runHeatingCycle(float humidity, float temp) {
       turnOffHeating();
       currentMode = COOLDOWN;
       lastModeChange = currentTime;
+      cooldownFadeActive = false;
     } else {
       // Still heating - show progress
       unsigned long remaining = HEAT_ON_TIME - timeInMode;
@@ -254,10 +297,12 @@ void runHeatingCycle(float humidity, float temp) {
         Serial.println("Still humid & below target - restarting HEATING");
         currentMode = HEATING;
         lastModeChange = currentTime;
+        cooldownFadeActive = false;
         turnOnHeating();
       } else {
         Serial.println("Conditions met - EXITING to IDLE");
         currentMode = IDLE;
+        cooldownFadeActive = false;
       }
     } else {
       // Still cooling - show progress
@@ -266,6 +311,80 @@ void runHeatingCycle(float humidity, float temp) {
       Serial.println(" seconds remaining");
     }
   }
+}
+
+void updateButtonState(unsigned long currentTime) {
+  bool buttonReading = digitalRead(BUTTON_PIN);
+
+  if (buttonReading != lastButtonReading) {
+    lastDebounceTime = currentTime;
+    lastButtonReading = buttonReading;
+  }
+
+  if ((currentTime - lastDebounceTime) >= BUTTON_DEBOUNCE_TIME && buttonReading != stableButtonState) {
+    stableButtonState = buttonReading;
+    if (stableButtonState == LOW) {
+      whiteLightOverride = !whiteLightOverride;
+      Serial.print("White light override: ");
+      Serial.println(whiteLightOverride ? "ON" : "OFF");
+    }
+  }
+}
+
+void updateStripColor(unsigned long currentTime) {
+  // Button override: force soft white regardless of heating state.
+  if (whiteLightOverride) {
+    setStripColorIfChanged(255, 180, 120);
+    return;
+  }
+
+  if (currentMode == HEATING) {
+    setStripColorIfChanged(255, 0, 0);
+    return;
+  }
+
+  if (currentMode == COOLDOWN) {
+    float progress = (float)(currentTime - lastModeChange) / (float)HEAT_OFF_TIME;
+    if (progress > 1.0f) progress = 1.0f;
+    uint8_t red = (uint8_t)(255.0f * (1.0f - progress));
+    uint8_t blue = (uint8_t)(255.0f * progress);
+    setStripColorIfChanged(red, 0, blue);
+    return;
+  }
+
+  // Early exit fade (humidity drop / safety cutoff / lockout hold).
+  if (cooldownFadeActive) {
+    float progress = (float)(currentTime - cooldownFadeStart) / (float)TRANSITION_FADE_TIME;
+    if (progress >= 1.0f) {
+      cooldownFadeActive = false;
+      setStripColorIfChanged(0, 0, 255);
+    } else {
+      uint8_t red = (uint8_t)(255.0f * (1.0f - progress));
+      uint8_t blue = (uint8_t)(255.0f * progress);
+      setStripColorIfChanged(red, 0, blue);
+    }
+    return;
+  }
+
+  // Default idle color.
+  setStripColorIfChanged(0, 0, 255);
+}
+
+void setStripColorIfChanged(uint8_t red, uint8_t green, uint8_t blue) {
+  if (ledStateInitialized && red == lastLedR && green == lastLedG && blue == lastLedB) {
+    return;
+  }
+
+  uint32_t color = strip.Color(red, green, blue);
+  for (int i = 0; i < LED_COUNT; i++) {
+    strip.setPixelColor(i, color);
+  }
+  strip.show();
+
+  lastLedR = red;
+  lastLedG = green;
+  lastLedB = blue;
+  ledStateInitialized = true;
 }
 
 void turnOnHeating() {
