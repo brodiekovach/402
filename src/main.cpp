@@ -42,7 +42,7 @@ ModulinoThermo thermo;
 #define MIN_TEMP 10.0            // Don't heat if room is too cold (safety)
 
 // Heating/Cooldown Timing (all in milliseconds)
-#define HEAT_ON_TIME 240000        // Heating pads ON for 4 minutes
+#define HEAT_ON_TIME 270000        // Heating pads ON for 4 minutes
 #define HEAT_OFF_TIME 60000        // Heater OFF, recheck every 1 minute
 
 // Sensor Check Intervals
