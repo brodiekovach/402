@@ -1,5 +1,5 @@
 /*
- * Automatic Defogging Mirror - Duty Cycle Control
+ * Automatic Defogging Mirror - Temperature-Hold Control
  * Arduino Uno R4 WiFi with Modulino Thermo
  *
  * SENSOR PLACEMENT:
@@ -8,16 +8,16 @@
  * - Heating pad: Attached to back of mirror, controlled by relay
  *
  * OPERATION:
- * OUTER LOOP (every 1 minute):
- *   - Check bathroom humidity
- *   - If humidity > threshold → Enter heating mode
- * 
- * INNER LOOP (heating mode):
- *   - Turn pads ON for 1 minute
- *   - Turn pads OFF for 2 minutes (cooldown)
- *   - Monitor temperature during cooldown
- *   - Check humidity: still high? → Repeat cycle
- *   - Humidity drops below threshold? → Exit to outer loop
+ * IDLE LOOP:
+ *   - Check humidity periodically
+ *   - If humidity is high enough, start a heating cycle
+ *
+ * ACTIVE LOOP:
+ *   - HEATING: pads ON for HEAT_ON_TIME (4 minutes)
+ *   - COOLDOWN: pads OFF, recheck once per minute
+ *   - If temp is still >= TARGET_TEMP, stay OFF and keep checking
+ *   - If temp drops below TARGET_TEMP, run another heat cycle
+ *   - If humidity drops below HUMIDITY_EXIT, return to IDLE
  */
 
 #include <Modulino.h>
@@ -41,18 +41,20 @@ ModulinoThermo thermo;
 #define TEMP_RESET_TEMP 39.0     // Re-enable heating after safety cutoff once cooled to this temp
 #define MIN_TEMP 10.0            // Don't heat if room is too cold (safety)
 
-// Duty Cycle Timing (all in milliseconds)
-#define HEAT_ON_TIME 60000       // Heating pads ON for 1 minute (60000 ms)
-#define HEAT_OFF_TIME 120000     // Heating pads OFF for 2 minutes (120000 ms)
+// Heating/Cooldown Timing (all in milliseconds)
+#define HEAT_ON_TIME 240000        // Heating pads ON for 4 minutes
+#define HEAT_OFF_TIME 60000        // Heater OFF, recheck every 1 minute
 
 // Sensor Check Intervals
-#define IDLE_CHECK_INTERVAL 30000   // Check sensors every 30 seconds when IDLE
-#define ACTIVE_CHECK_INTERVAL 10000 // Check sensors every 10 seconds when heating/cooling
+#define IDLE_CHECK_INTERVAL 60000   // Check sensors every 1 minute when IDLE
+#define ACTIVE_CHECK_INTERVAL 10000 // Check sensors every 10 seconds when active
 
 // LED Settings
 #define LED_COUNT 30                // Number of LEDs in the WS2812B strip
 #define LED_BRIGHTNESS 80           // Global strip brightness (0-255)
-#define TRANSITION_FADE_TIME 8000   // Red->Blue fade time when stopping early (ms)
+#define TRANSITION_FADE_TIME 8000   // Red->Blue fade time when heating stops (ms)
+#define RED_STROBE_PERIOD 2000      // Slow red strobe period while heating (ms)
+#define RED_STROBE_MIN 40           // Minimum red intensity during strobe (0-255)
 #define BUTTON_DEBOUNCE_TIME 50     // Button debounce time (ms)
 // =============================================
 
@@ -105,7 +107,7 @@ void setup() {
   Serial.println();
   Serial.println("=== Automatic Defogging Mirror ===");
   Serial.println("Hardware: Arduino Uno R4 WiFi + Modulino Thermo");
-  Serial.println("Control: Duty Cycle (1 min ON / 2 min OFF)");
+  Serial.println("Control: 4 min heat + temp recheck hold");
   Serial.println();
 
   // Initialize pins
@@ -194,8 +196,10 @@ void loop() {
           turnOffHeating();
         }
         currentMode = IDLE;
-        cooldownFadeActive = true;
-        cooldownFadeStart = currentTime;
+        if (!cooldownFadeActive) {
+          cooldownFadeActive = true;
+          cooldownFadeStart = currentTime;
+        }
         Serial.print("Temp lockout active: waiting to cool to ");
         Serial.print(TEMP_RESET_TEMP, 1);
         Serial.println("°C before reheating");
@@ -278,7 +282,8 @@ void runHeatingCycle(float humidity, float temp) {
       turnOffHeating();
       currentMode = COOLDOWN;
       lastModeChange = currentTime;
-      cooldownFadeActive = false;
+      cooldownFadeActive = true;
+      cooldownFadeStart = currentTime;
     } else {
       // Still heating - show progress
       unsigned long remaining = HEAT_ON_TIME - timeInMode;
@@ -287,22 +292,25 @@ void runHeatingCycle(float humidity, float temp) {
     }
   }
   else if (currentMode == COOLDOWN) {
-    // Currently cooling - check if OFF time expired
+    // Heater OFF hold: evaluate once per minute.
     if (timeInMode >= HEAT_OFF_TIME) {
-      Serial.println("Cooldown complete");
+      Serial.println("Cooldown recheck");
       Serial.print("Current temp: "); Serial.print(temp, 1); Serial.println("°C");
       
-      // Check if we should heat again
-      if (humidity >= HUMIDITY_THRESHOLD && temp < TARGET_TEMP) {
-        Serial.println("Still humid & below target - restarting HEATING");
+      // Continue active control while humidity remains elevated.
+      if (humidity >= HUMIDITY_EXIT && temp < TARGET_TEMP) {
+        Serial.println("Temp below target - restarting HEATING");
         currentMode = HEATING;
         lastModeChange = currentTime;
         cooldownFadeActive = false;
         turnOnHeating();
-      } else {
-        Serial.println("Conditions met - EXITING to IDLE");
+      } else if (humidity < HUMIDITY_EXIT) {
+        Serial.println("Humidity low - EXITING to IDLE");
         currentMode = IDLE;
         cooldownFadeActive = false;
+      } else {
+        Serial.println("Temp still above target - staying OFF");
+        lastModeChange = currentTime;
       }
     } else {
       // Still cooling - show progress
@@ -339,20 +347,17 @@ void updateStripColor(unsigned long currentTime) {
   }
 
   if (currentMode == HEATING) {
-    setStripColorIfChanged(255, 0, 0);
+    unsigned long phase = currentTime % RED_STROBE_PERIOD;
+    unsigned long halfPeriod = RED_STROBE_PERIOD / 2;
+    float ramp = (phase < halfPeriod)
+      ? (float)phase / (float)halfPeriod
+      : (float)(RED_STROBE_PERIOD - phase) / (float)halfPeriod;
+    uint8_t red = (uint8_t)(RED_STROBE_MIN + (255.0f - RED_STROBE_MIN) * ramp);
+    setStripColorIfChanged(red, 0, 0);
     return;
   }
 
-  if (currentMode == COOLDOWN) {
-    float progress = (float)(currentTime - lastModeChange) / (float)HEAT_OFF_TIME;
-    if (progress > 1.0f) progress = 1.0f;
-    uint8_t red = (uint8_t)(255.0f * (1.0f - progress));
-    uint8_t blue = (uint8_t)(255.0f * progress);
-    setStripColorIfChanged(red, 0, blue);
-    return;
-  }
-
-  // Early exit fade (humidity drop / safety cutoff / lockout hold).
+  // Fade from red to blue after heating stops.
   if (cooldownFadeActive) {
     float progress = (float)(currentTime - cooldownFadeStart) / (float)TRANSITION_FADE_TIME;
     if (progress >= 1.0f) {
@@ -366,7 +371,7 @@ void updateStripColor(unsigned long currentTime) {
     return;
   }
 
-  // Default idle color.
+  // Default non-heating color.
   setStripColorIfChanged(0, 0, 255);
 }
 
