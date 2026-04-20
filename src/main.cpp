@@ -22,13 +22,16 @@
 
 #include <Modulino.h>
 #include <Adafruit_NeoPixel.h>
+#include <DHT.h>
 
 ModulinoThermo thermo;
 
 // Pin Definitions
 #define RELAY_PIN A5         // Relay module control pin for heating pad
-#define LED_PIN 6            // WS2812B data input pin
+#define LED_PIN A1            // WS2812B data input pin
 #define BUTTON_PIN 4         // Button pin (wired to GND, uses INPUT_PULLUP)
+#define DHT_PIN 2            // Placeholder pin for DHT11 data line
+#define DHT_TYPE DHT11
 
 // ============ ADJUST THESE VALUES ============
 // Humidity Thresholds
@@ -66,6 +69,7 @@ enum SystemMode {
 };
 
 Adafruit_NeoPixel strip(LED_COUNT, LED_PIN, NEO_GRB + NEO_KHZ800);
+DHT dht(DHT_PIN, DHT_TYPE);
 
 SystemMode currentMode = IDLE;
 bool heatingActive = false;
@@ -132,6 +136,10 @@ void setup() {
   thermo.begin();
   Serial.println("Thermo sensor initialized OK");
 
+  Serial.println("Initializing DHT11 temperature sensor...");
+  dht.begin();
+  Serial.println("DHT11 initialized OK");
+
   Serial.println();
   Serial.println("** Mount sensor at top/bottom of mirror with air hole **");
   Serial.println("System ready. Starting in IDLE mode...");
@@ -154,9 +162,9 @@ void loop() {
   if (currentTime - lastSensorRead >= checkInterval) {
     lastSensorRead = currentTime;
 
-    // Read humidity and temperature from Modulino Thermo
+    // Read humidity from Modulino Thermo and temperature from DHT11
     float humidity = thermo.getHumidity();
-    float mirrorTemp = thermo.getTemperature();
+    float mirrorTemp = dht.readTemperature();
 
     // Check for sensor errors
     if (isnan(humidity) || isnan(mirrorTemp)) {
