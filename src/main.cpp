@@ -29,8 +29,8 @@ ModulinoThermo thermo;
 // Pin Definitions
 #define RELAY_PIN A5         // Relay module control pin for heating pad
 #define LED_PIN A1            // WS2812B data input pin
-#define BUTTON_PIN 4         // Button pin (wired to GND, uses INPUT_PULLUP)
-#define DHT_PIN 2            // Placeholder pin for DHT11 data line
+#define BUTTON_PIN A2         // Button pin (wired to GND, uses INPUT_PULLUP)
+#define DHT_PIN 2            // dht11
 #define DHT_TYPE DHT11
 
 // ============ ADJUST THESE VALUES ============
@@ -40,21 +40,24 @@ ModulinoThermo thermo;
 
 // Temperature Limits
 #define TARGET_TEMP 40.0         // Target mirror temperature in Celsius (104°F)
-#define MAX_SAFE_TEMP 50.0       // Safety cutoff - stop if exceeded (113°F)
-#define TEMP_RESET_TEMP 39.0     // Re-enable heating after safety cutoff once cooled to this temp
+#define MAX_SAFE_TEMP 41.0       // ~105 degree since its on corner
+#define TEMP_RESET_TEMP 32.0     // Re-enable heating after safety cutoff once cooled to this temp
 #define MIN_TEMP 10.0            // Don't heat if room is too cold (safety)
 
 // Heating/Cooldown Timing (all in milliseconds)
-#define HEAT_ON_TIME 270000        // Heating pads ON for 4 minutes
+#define HEAT_ON_TIME 90000        // Heating pads on for 1.5 min
+//#define HEAT_ON_TIME 3000         // Expo Logic
 #define HEAT_OFF_TIME 60000        // Heater OFF, recheck every 1 minute
+//#define HEAT_OFF_TIME 3000       // Expo Logic
 
 // Sensor Check Intervals
-#define IDLE_CHECK_INTERVAL 60000   // Check sensors every 1 minute when IDLE
-#define ACTIVE_CHECK_INTERVAL 10000 // Check sensors every 10 seconds when active
+#define IDLE_CHECK_INTERVAL 5000   // 5 seconds
+#define ACTIVE_CHECK_INTERVAL 5000  // 5 seconds while active
+#define HEATING_HUMIDITY_INTERVAL 90000 // In HEATING, read humidity every 1.5 minute
 
 // LED Settings
-#define LED_COUNT 30                // Number of LEDs in the WS2812B strip
-#define LED_BRIGHTNESS 80           // Global strip brightness (0-255)
+#define LED_COUNT 64                // Number of LEDs in the WS2812B strip
+#define LED_BRIGHTNESS 175         // Global strip brightness (0-255)
 #define TRANSITION_FADE_TIME 8000   // Red->Blue fade time when heating stops (ms)
 #define RED_STROBE_PERIOD 2000      // Slow red strobe period while heating (ms)
 #define RED_STROBE_MIN 40           // Minimum red intensity during strobe (0-255)
@@ -77,8 +80,10 @@ bool temperatureLockout = false;
 bool whiteLightOverride = false;
 bool cooldownFadeActive = false;
 unsigned long lastSensorRead = 0;
+unsigned long lastHumidityRead = 0;
 unsigned long lastModeChange = 0;
 unsigned long cooldownFadeStart = 0;
+float lastHumidity = NAN;
 
 bool lastButtonReading = HIGH;
 bool stableButtonState = HIGH;
@@ -155,15 +160,33 @@ void loop() {
   updateButtonState(currentTime);
   updateStripColor(currentTime);
 
-  // Determine check interval based on mode
+  // Determine control interval based on mode
   unsigned long checkInterval = (currentMode == IDLE) ? IDLE_CHECK_INTERVAL : ACTIVE_CHECK_INTERVAL;
 
   // Read sensors at appropriate intervals
   if (currentTime - lastSensorRead >= checkInterval) {
     lastSensorRead = currentTime;
 
-    // Read humidity from Modulino Thermo and temperature from DHT11
-    float humidity = thermo.getHumidity();
+    // Read humidity from Modulino Thermo.
+    // In HEATING mode, humidity is sampled once per minute and cached between samples.
+    bool readHumidityNow = (currentMode != HEATING) ||
+                           ((currentTime - lastHumidityRead) >= HEATING_HUMIDITY_INTERVAL) ||
+                           isnan(lastHumidity);
+
+    float humidity;
+    if (readHumidityNow) {
+      humidity = thermo.getHumidity();
+      if (!isnan(humidity)) {
+        lastHumidity = humidity;
+        lastHumidityRead = currentTime;
+      } else if (currentMode == HEATING && !isnan(lastHumidity)) {
+        humidity = lastHumidity;
+      }
+    } else {
+      humidity = lastHumidity;
+    }
+
+    // Temperature still checks every control cycle.
     float mirrorTemp = dht.readTemperature();
 
     // Check for sensor errors
@@ -173,7 +196,7 @@ void loop() {
         turnOffHeating();
         currentMode = IDLE;
       }
-      return;
+      //return;
     }
 
     // Display current readings
