@@ -1,22 +1,21 @@
 /*
- * Automatic Defogging Mirror - Temperature-Hold Control
+ * Automatic Defogging Mirror
  * Arduino Uno R4 WiFi with Modulino Thermo
  *
  * SENSOR PLACEMENT:
- * - Modulino Thermo: Mount at top/bottom of mirror with air hole
- *   Measures bathroom humidity AND mirror temperature
+ * - Modulino Thermo: Mount at top of mirror with air hole
+ * - Measures bathroom humidity
  * - Heating pad: Attached to back of mirror, controlled by relay
  *
  * OPERATION:
  * IDLE LOOP:
  *   - Check humidity periodically
- *   - If humidity is high enough, start a heating cycle
+ *   - If humidity is high enough, start heating cycle
  *
  * ACTIVE LOOP:
- *   - HEATING: pads ON for HEAT_ON_TIME (4 minutes)
+ *   - HEATING: pads ON for HEAT_ON_TIME (2 min)
  *   - COOLDOWN: pads OFF, recheck once per minute
- *   - If temp is still >= TARGET_TEMP, stay OFF and keep checking
- *   - If temp drops below TARGET_TEMP, run another heat cycle
+ *   - If temp > limit, turn off pads and check if temp < temp_reset
  *   - If humidity drops below HUMIDITY_EXIT, return to IDLE
  */
 
@@ -27,48 +26,45 @@
 ModulinoThermo thermo;
 
 // Pin Definitions
-#define RELAY_PIN A5         // Relay module control pin for heating pad
-#define LED_PIN A1            // WS2812B data input pin
-#define BUTTON_PIN A2         // Button pin (wired to GND, uses INPUT_PULLUP)
+#define RELAY_PIN A5         // Relay module control pin for heating pads
+#define LED_PIN A1            // WS2812B led strip
+#define BUTTON_PIN A2         // Button pin 
 #define DHT_PIN 2            // dht11
 #define DHT_TYPE DHT11
 
-// ============ ADJUST THESE VALUES ============
 // Humidity Thresholds
-#define HUMIDITY_THRESHOLD 70.0  // Start heating when humidity exceeds this (%)
-#define HUMIDITY_EXIT 60.0       // Exit heating mode when humidity drops below this (%)
+#define HUMIDITY_THRESHOLD 70.0  // Start heating when humidity hits this %
+#define HUMIDITY_EXIT 60.0       // Exit heating mode when humidity drops below this %
 
 // Temperature Limits
 #define TARGET_TEMP 40.0         // Target mirror temperature in Celsius (104°F)
 #define MAX_SAFE_TEMP 41.0       // ~105 degree since its on corner
 #define TEMP_RESET_TEMP 32.0     // Re-enable heating after safety cutoff once cooled to this temp
-#define MIN_TEMP 10.0            // Don't heat if room is too cold (safety)
+#define MIN_TEMP 10.0            // Don't heat if room  is too cold
 
 // Heating/Cooldown Timing (all in milliseconds)
-#define HEAT_ON_TIME 90000        // Heating pads on for 1.5 min
-//#define HEAT_ON_TIME 3000         // Expo Logic
-#define HEAT_OFF_TIME 60000        // Heater OFF, recheck every 1 minute
-//#define HEAT_OFF_TIME 3000       // Expo Logic
+#define HEAT_ON_TIME 120000        // Heating pads on for 2 min
+#define HEAT_OFF_TIME 60000        // Heater off for 1 min
 
 // Sensor Check Intervals
 #define IDLE_CHECK_INTERVAL 5000   // 5 seconds
 #define ACTIVE_CHECK_INTERVAL 5000  // 5 seconds while active
-#define HEATING_HUMIDITY_INTERVAL 90000 // In HEATING, read humidity every 1.5 minute
+#define HEATING_HUMIDITY_INTERVAL 120000 // In HEATING, read humidity every 2 minute (logic for expo only)
 
 // LED Settings
 #define LED_COUNT 64                // Number of LEDs in the WS2812B strip
-#define LED_BRIGHTNESS 175         // Global strip brightness (0-255)
-#define TRANSITION_FADE_TIME 8000   // Red->Blue fade time when heating stops (ms)
-#define RED_STROBE_PERIOD 2000      // Slow red strobe period while heating (ms)
-#define RED_STROBE_MIN 40           // Minimum red intensity during strobe (0-255)
-#define BUTTON_DEBOUNCE_TIME 50     // Button debounce time (ms)
+#define LED_BRIGHTNESS 175          // strip brightness
+#define TRANSITION_FADE_TIME 8000   // Red->Blue fade time when heating stops
+#define RED_STROBE_PERIOD 2000      // Slow red strobe period while heating
+#define RED_STROBE_MIN 40           // Minimum red intensity during strobe
+#define BUTTON_DEBOUNCE_TIME 50     // Button debounce time
 // =============================================
 
 // System State
 enum SystemMode {
-  IDLE,           // Waiting, checking humidity every 30 seconds
+  IDLE,           // check humidity every 5 seconds
   HEATING,        // Heating pads ON
-  COOLDOWN        // Heating pads OFF, waiting before next cycle
+  COOLDOWN        // Heating pads OFF
 };
 
 Adafruit_NeoPixel strip(LED_COUNT, LED_PIN, NEO_GRB + NEO_KHZ800);
@@ -107,7 +103,7 @@ float celsiusToFahrenheit(float celsius);
 void setup() {
   Serial.begin(9600);
   
-  // Wait up to 3 seconds for serial connection (prevents hanging)
+  // Wait up to 3 seconds for serial connection
   unsigned long startTime = millis();
   while (!Serial && (millis() - startTime < 3000)) { 
     delay(10); 
@@ -152,7 +148,7 @@ void setup() {
   Serial.print(IDLE_CHECK_INTERVAL / 1000); 
   Serial.println(" seconds");
   Serial.println();
-  delay(2000); // Let sensors stabilize
+  delay(2000); 
 }
 
 void loop() {
@@ -167,8 +163,8 @@ void loop() {
   if (currentTime - lastSensorRead >= checkInterval) {
     lastSensorRead = currentTime;
 
-    // Read humidity from Modulino Thermo.
-    // In HEATING mode, humidity is sampled once per minute and cached between samples.
+    // Read humidity from sensor
+    // In HEATING mode, humidity is sampled once per minute and cached
     bool readHumidityNow = (currentMode != HEATING) ||
                            ((currentTime - lastHumidityRead) >= HEATING_HUMIDITY_INTERVAL) ||
                            isnan(lastHumidity);
@@ -190,14 +186,16 @@ void loop() {
     float mirrorTemp = dht.readTemperature();
 
     // Check for sensor errors
-    if (isnan(humidity) || isnan(mirrorTemp)) {
+    /*if (isnan(humidity) || isnan(mirrorTemp)) {
       Serial.println("ERROR: Cannot read sensor!");
       if (heatingActive) {
         turnOffHeating();
         currentMode = IDLE;
       }
       //return;
-    }
+    }*/
+
+    if (isnan(humidity))
 
     // Display current readings
     Serial.println("--- Sensor Readings ---");
@@ -276,12 +274,12 @@ void checkAndEnterHeatingMode(float humidity, float temp) {
   }
 }
 
-// HEATING/COOLDOWN Mode: Run duty cycle
+// HEATING/COOLDOWN Modes
 void runHeatingCycle(float humidity, float temp) {
   unsigned long currentTime = millis();
   unsigned long timeInMode = currentTime - lastModeChange;
   
-  // SAFETY: Check if temperature is too high
+  // Check if temperature is too high
   if (temp >= MAX_SAFE_TEMP) {
     Serial.print("SAFETY CUTOFF: Temp too high (");
     Serial.print(temp, 1); Serial.println("°C)");
@@ -293,7 +291,7 @@ void runHeatingCycle(float humidity, float temp) {
     return;
   }
   
-  // Check if humidity has dropped - exit heating mode
+  // Check if humidity has dropped: exit heating mode
   if (humidity < HUMIDITY_EXIT) {
     Serial.print("Humidity dropped to "); Serial.print(humidity, 1);
     Serial.println("% - EXITING to IDLE mode");
@@ -304,9 +302,8 @@ void runHeatingCycle(float humidity, float temp) {
     return;
   }
   
-  // Duty cycle state machine
   if (currentMode == HEATING) {
-    // Currently heating - check if ON time expired
+    // Currently heating: check if ON time expired
     if (timeInMode >= HEAT_ON_TIME) {
       Serial.println("Heat ON time complete - entering COOLDOWN");
       Serial.print("Mirror reached: "); Serial.print(temp, 1); Serial.println("°C");
@@ -316,7 +313,7 @@ void runHeatingCycle(float humidity, float temp) {
       cooldownFadeActive = true;
       cooldownFadeStart = currentTime;
     } else {
-      // Still heating - show progress
+      // Still heating
       unsigned long remaining = HEAT_ON_TIME - timeInMode;
       Serial.print("Heating: "); Serial.print(remaining / 1000);
       Serial.println(" seconds remaining");
@@ -344,7 +341,7 @@ void runHeatingCycle(float humidity, float temp) {
         lastModeChange = currentTime;
       }
     } else {
-      // Still cooling - show progress
+      // Still cooling
       unsigned long remaining = HEAT_OFF_TIME - timeInMode;
       Serial.print("Cooldown: "); Serial.print(remaining / 1000);
       Serial.println(" seconds remaining");
@@ -371,7 +368,7 @@ void updateButtonState(unsigned long currentTime) {
 }
 
 void updateStripColor(unsigned long currentTime) {
-  // Button override: force soft white regardless of heating state.
+  // Button override: soft white vanity mode
   if (whiteLightOverride) {
     setStripColorIfChanged(255, 180, 120);
     return;
@@ -388,7 +385,7 @@ void updateStripColor(unsigned long currentTime) {
     return;
   }
 
-  // Fade from red to blue after heating stops.
+  // Fade from red to blue after heating stops
   if (cooldownFadeActive) {
     float progress = (float)(currentTime - cooldownFadeStart) / (float)TRANSITION_FADE_TIME;
     if (progress >= 1.0f) {
@@ -402,7 +399,7 @@ void updateStripColor(unsigned long currentTime) {
     return;
   }
 
-  // Default non-heating color.
+  // Default non-heating color
   setStripColorIfChanged(0, 0, 255);
 }
 
